@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teste do mapa Mapbox</title>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.10.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.10.0/mapbox-gl.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #1a1a1a; background: #fff; }
+  body { display: flex; flex-direction: column; }
+  header { padding: 10px 12px; border-bottom: 1px solid #ddd; background: #fff; }
+  .nota { margin: 0 0 8px; font-size: 13px; color: #444; }
+  .linha { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+  input[type=text], select { flex: 1 1 200px; min-width: 0; padding: 10px; font-size: 16px; border: 1px solid #bbb; border-radius: 6px; background: #fff; color: #1a1a1a; }
+  button { padding: 10px 14px; font-size: 15px; border: 1px solid #1a1a1a; background: #1a1a1a; color: #fff; border-radius: 6px; cursor: pointer; }
+  button.sec { background: #fff; color: #1a1a1a; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #aviso { display: none; margin-top: 6px; padding: 8px 10px; font-size: 13px; background: #fff4e0; border: 1px solid #e0b060; border-radius: 6px; }
+  #aviso.erro { background: #fde8e8; border-color: #d08080; }
+  #area { position: relative; flex: 1; min-height: 0; }
+  #mapa { position: absolute; inset: 0; }
+  #painel { position: absolute; left: 10px; bottom: 24px; z-index: 2; background: #fff; border: 1px solid #ccc; border-radius: 8px; padding: 8px 12px; font-size: 14px; box-shadow: 0 1px 6px rgba(0,0,0,.2); display: none; }
+  #painel b { font-size: 16px; }
+  .marcador { width: 30px; height: 30px; border-radius: 50%; border: 3px solid #fff; color: #fff; font-weight: 700; font-size: 14px; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(0,0,0,.45); cursor: pointer; }
+  .eu { width: 18px; height: 18px; border-radius: 50%; background: #1a73e8; border: 3px solid #fff; box-shadow: 0 0 0 6px rgba(26,115,232,.25); }
+  #vazio { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px; color: #666; font-size: 15px; }
+</style>
+</head>
+<body>
+<header>
+  <p class="nota">Teste para avaliar qualidade do mapa. Seu token fica só nesta página, não é salvo.</p>
+  <div class="linha">
+    <input type="text" id="token" placeholder="Cole aqui o token público do Mapbox (pk....)" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="carregar">Carregar mapa</button>
+  </div>
+  <div class="linha">
+    <select id="estilo" disabled>
+      <option value="mapbox://styles/mapbox/streets-v12">Ruas</option>
+      <option value="mapbox://styles/mapbox/light-v11">Claro</option>
+      <option value="mapbox://styles/mapbox/dark-v11">Escuro</option>
+      <option value="mapbox://styles/mapbox/satellite-streets-v12">Satélite com ruas</option>
+    </select>
+    <button id="localizar" class="sec" disabled>Localizar eu</button>
+  </div>
+  <div id="aviso"></div>
+</header>
+<div id="area">
+  <div id="mapa"></div>
+  <div id="vazio">Cole o token e toque em "Carregar mapa".</div>
+  <div id="painel"></div>
+</div>
+
+<script>
+(function () {
+  // Token só em memória (variável), nunca salvo.
+  var tokenAtual = null;
+  var mapa = null;
+  var marcadoresEu = null;
+  var coordsRota = null; // geometria atual da rota (lista de [lng,lat])
+
+  var PONTOS = [
+    { nome: 'Centro', lng: -49.2539, lat: -16.6786, cor: '#d93025' },
+    { nome: 'Setor Bueno', lng: -49.2700, lat: -16.6995, cor: '#1a73e8' },
+    { nome: 'Setor Oeste', lng: -49.2770, lat: -16.6850, cor: '#188038' },
+    { nome: 'Setor Marista', lng: -49.2600, lat: -16.7060, cor: '#e37400' },
+    { nome: 'Jardim Goiás', lng: -49.2400, lat: -16.7100, cor: '#9334e6' },
+    { nome: 'Campinas', lng: -49.2620, lat: -16.6640, cor: '#0b8a8a' }
+  ];
+
+  var elToken = document.getElementById('token');
+  var elAviso = document.getElementById('aviso');
+  var elPainel = document.getElementById('painel');
+  var elEstilo = document.getElementById('estilo');
+  var elLocalizar = document.getElementById('localizar');
+
+  function aviso(msg, erro) {
+    if (!msg) { elAviso.style.display = 'none'; return; }
+    elAviso.textContent = msg;
+    elAviso.className = erro ? 'erro' : '';
+    elAviso.style.display = 'block';
+  }
+
+  function fmtDist(m) { return m >= 1000 ? (m / 1000).toFixed(1).replace('.', ',') + ' km' : Math.round(m) + ' m'; }
+  function fmtTempo(s) {
+    var min = Math.round(s / 60);
+    if (min < 60) return min + ' min';
+    return Math.floor(min / 60) + ' h ' + (min % 60) + ' min';
+  }
+  function haversine(a, b) {
+    var R = 6371000, r = Math.PI / 180;
+    var dLat = (b[1] - a[1]) * r, dLng = (b[0] - a[0]) * r;
+    var x = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(a[1] * r) * Math.cos(b[1] * r) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.sqrt(x));
+  }
+
+  function criarMarcadores() {
+    PONTOS.forEach(function (p, i) {
+      var el = document.createElement('div');
+      el.className = 'marcador';
+      el.style.background = p.cor;
+      el.textContent = String(i + 1);
+      var popup = new mapboxgl.Popup({ offset: 18 }).setText((i + 1) + ' - ' + p.nome);
+      new mapboxgl.Marker({ element: el }).setLngLat([p.lng, p.lat]).setPopup(popup).addTo(mapa);
+    });
+  }
+
+  function desenharLinha(coords, tracejada) {
+    var dados = { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } };
+    if (mapa.getSource('rota')) {
+      mapa.getSource('rota').setData(dados);
+      mapa.setPaintProperty('rota-linha', 'line-dasharray', tracejada ? [2, 2] : [1, 0]);
+      return;
+    }
+    mapa.addSource('rota', { type: 'geojson', data: dados });
+    mapa.addLayer({
+      id: 'rota-linha', type: 'line', source: 'rota',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#1a73e8', 'line-width': 5, 'line-opacity': 0.85, 'line-dasharray': tracejada ? [2, 2] : [1, 0] }
+    });
+  }
+
+  function linhaReta() {
+    var coords = PONTOS.map(function (p) { return [p.lng, p.lat]; });
+    var d = 0;
+    for (var i = 1; i < coords.length; i++) d += haversine(coords[i - 1], coords[i]);
+    return { coords: coords, dist: d };
+  }
+
+  function carregarRota() {
+    var lista = PONTOS.map(function (p) { return p.lng + ',' + p.lat; }).join(';');
+    var url = 'https://api.mapbox.com/directions/v5/mapbox/driving/' + lista +
+      '?geometries=geojson&overview=full&access_token=' + encodeURIComponent(tokenAtual);
+    fetch(url).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      if (!j.routes || !j.routes.length) throw new Error(j.message || 'sem rota');
+      var rota = j.routes[0];
+      coordsRota = rota.geometry.coordinates;
+      desenharLinha(coordsRota, false);
+      elPainel.innerHTML = 'Distância total: <b>' + fmtDist(rota.distance) + '</b><br>Tempo estimado: <b>' + fmtTempo(rota.duration) + '</b> (de carro)';
+      elPainel.style.display = 'block';
+    }).catch(function (e) {
+      aviso('Não foi possível obter a rota pela API Directions (' + e.message + '). Mostrando linha reta entre os pontos.', false);
+      var lr = linhaReta();
+      desenharLinha(lr.coords, true);
+      elPainel.innerHTML = 'Distância total (linha reta): <b>' + fmtDist(lr.dist) + '</b><br>Tempo estimado: indisponível';
+      elPainel.style.display = 'block';
+    });
+  }
+
+  function aoCarregarEstilo() {
+    // Reaplica a rota depois de trocar o estilo (o estilo novo apaga camadas).
+    if (coordsRota) desenharLinha(coordsRota, false);
+    else if (mapa.getSource('rota')) { /* mantém */ }
+  }
+
+  function iniciar() {
+    var t = elToken.value.trim();
+    if (!/^pk\./.test(t)) { aviso('O token público deve começar com "pk.". Não use token secreto (sk.).', true); return; }
+    aviso(null);
+    tokenAtual = t;
+    elToken.value = '';
+    elToken.placeholder = 'Token carregado (só na memória)';
+    document.getElementById('vazio').style.display = 'none';
+    if (mapa) { mapa.remove(); mapa = null; coordsRota = null; }
+    elPainel.style.display = 'none';
+
+    mapboxgl.accessToken = tokenAtual;
+    try {
+      mapa = new mapboxgl.Map({
+        container: 'mapa',
+        style: elEstilo.value,
+        center: [-49.2643, -16.6864],
+        zoom: 12
+      });
+    } catch (e) {
+      aviso('Erro ao iniciar o mapa: ' + e.message, true);
+      return;
+    }
+    mapa.addControl(new mapboxgl.NavigationControl(), 'top-right');
+    mapa.addControl(new mapboxgl.ScaleControl({ unit: 'metric' }), 'bottom-right');
+    mapa.on('error', function (ev) {
+      var m = ev && ev.error && ev.error.message ? ev.error.message : 'erro desconhecido';
+      aviso('Erro do mapa: ' + m + ' (confira se o token está correto).', true);
+    });
+    mapa.on('style.load', aoCarregarEstilo);
+    mapa.once('load', function () {
+      criarMarcadores();
+      carregarRota();
+    });
+    elEstilo.disabled = false;
+    elLocalizar.disabled = false;
+  }
+
+  document.getElementById('carregar').addEventListener('click', iniciar);
+  elToken.addEventListener('keydown', function (e) { if (e.key === 'Enter') iniciar(); });
+
+  elEstilo.addEventListener('change', function () {
+    if (mapa) mapa.setStyle(elEstilo.value);
+  });
+
+  elLocalizar.addEventListener('click', function () {
+    if (!mapa) return;
+    if (!navigator.geolocation) { aviso('Seu navegador não suporta geolocalização.', true); return; }
+    aviso('Buscando sua localização...', false);
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      aviso(null);
+      var ll = [pos.coords.longitude, pos.coords.latitude];
+      if (marcadoresEu) marcadoresEu.remove();
+      var el = document.createElement('div');
+      el.className = 'eu';
+      marcadoresEu = new mapboxgl.Marker({ element: el }).setLngLat(ll).addTo(mapa);
+      mapa.flyTo({ center: ll, zoom: 15 });
+    }, function (err) {
+      aviso('Não foi possível obter sua localização: ' + err.message, true);
+    }, { enableHighAccuracy: true, timeout: 15000 });
+  });
+})();
+</script>
+</body>
+</html>
