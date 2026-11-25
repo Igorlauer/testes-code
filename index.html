@@ -44,6 +44,18 @@
     </select>
     <button id="localizar" class="sec" disabled>Localizar eu</button>
   </div>
+  <div class="linha">
+    <select id="cidade" aria-label="Cidade">
+      <option value="goiania">Goiânia, GO</option>
+      <option value="bauru">Bauru, SP</option>
+      <option value="outra">Outra cidade (buscar)</option>
+    </select>
+  </div>
+  <div class="linha" id="buscaCidade" style="display:none">
+    <input type="text" id="textoCidade" placeholder="Digite o nome da cidade" autocomplete="off">
+    <button id="buscarCidade">Buscar</button>
+  </div>
+  <div class="linha" id="resultadosCidade"></div>
   <div id="aviso"></div>
 </header>
 <div id="area">
@@ -60,20 +72,48 @@
   var marcadoresEu = null;
   var coordsRota = null; // geometria atual da rota (lista de [lng,lat])
 
-  var PONTOS = [
-    { nome: 'Centro', lng: -49.2539, lat: -16.6786, cor: '#d93025' },
-    { nome: 'Setor Bueno', lng: -49.2700, lat: -16.6995, cor: '#1a73e8' },
-    { nome: 'Setor Oeste', lng: -49.2770, lat: -16.6850, cor: '#188038' },
-    { nome: 'Setor Marista', lng: -49.2600, lat: -16.7060, cor: '#e37400' },
-    { nome: 'Jardim Goiás', lng: -49.2400, lat: -16.7100, cor: '#9334e6' },
-    { nome: 'Campinas', lng: -49.2620, lat: -16.6640, cor: '#0b8a8a' }
-  ];
+  var CORES = ['#d93025', '#1a73e8', '#188038', '#e37400', '#9334e6', '#0b8a8a'];
+  // Coordenadas aproximadas: conferir no mapa.
+  var CIDADES = {
+    goiania: {
+      centro: [-49.2643, -16.6864], zoom: 12,
+      pontos: [
+        { nome: 'Centro', lng: -49.2539, lat: -16.6786 },
+        { nome: 'Setor Bueno', lng: -49.2700, lat: -16.6995 },
+        { nome: 'Setor Oeste', lng: -49.2770, lat: -16.6850 },
+        { nome: 'Setor Marista', lng: -49.2600, lat: -16.7060 },
+        { nome: 'Jardim Goiás', lng: -49.2400, lat: -16.7100 },
+        { nome: 'Campinas', lng: -49.2620, lat: -16.6640 }
+      ]
+    },
+    bauru: {
+      centro: [-49.0608, -22.3147], zoom: 12,
+      pontos: [
+        { nome: 'Centro', lng: -49.0640, lat: -22.3150 },
+        { nome: 'Vila Universitária', lng: -49.0300, lat: -22.3470 },
+        { nome: 'Jardim Estoril', lng: -49.0900, lat: -22.3330 },
+        { nome: 'Jardim Europa', lng: -49.0930, lat: -22.3100 },
+        { nome: 'Núcleo Habitacional Mary Dota', lng: -49.0420, lat: -22.3030 },
+        { nome: 'Vila Falcão', lng: -49.0790, lat: -22.3350 }
+      ]
+    }
+  };
+  Object.keys(CIDADES).forEach(function (k) {
+    CIDADES[k].pontos.forEach(function (p, i) { p.cor = CORES[i]; });
+  });
+  var cidadeAtual = 'goiania';
+  var PONTOS = CIDADES.goiania.pontos;
+  var marcadores = []; // marcadores atuais (para remover ao trocar de cidade)
 
   var elToken = document.getElementById('token');
   var elAviso = document.getElementById('aviso');
   var elPainel = document.getElementById('painel');
   var elEstilo = document.getElementById('estilo');
   var elLocalizar = document.getElementById('localizar');
+  var elCidade = document.getElementById('cidade');
+  var elBusca = document.getElementById('buscaCidade');
+  var elTextoCidade = document.getElementById('textoCidade');
+  var elResultados = document.getElementById('resultadosCidade');
 
   function aviso(msg, erro) {
     if (!msg) { elAviso.style.display = 'none'; return; }
@@ -103,7 +143,71 @@
       el.style.background = p.cor;
       el.textContent = String(i + 1);
       var popup = new mapboxgl.Popup({ offset: 18 }).setText((i + 1) + ' - ' + p.nome);
-      new mapboxgl.Marker({ element: el }).setLngLat([p.lng, p.lat]).setPopup(popup).addTo(mapa);
+      marcadores.push(new mapboxgl.Marker({ element: el }).setLngLat([p.lng, p.lat]).setPopup(popup).addTo(mapa));
+    });
+  }
+
+  function limparMarcadoresERota() {
+    marcadores.forEach(function (m) { m.remove(); });
+    marcadores = [];
+    coordsRota = null;
+    if (mapa && mapa.getLayer('rota-linha')) mapa.removeLayer('rota-linha');
+    if (mapa && mapa.getSource('rota')) mapa.removeSource('rota');
+    elPainel.style.display = 'none';
+  }
+
+  function aplicarCidade(chave) {
+    cidadeAtual = chave;
+    var c = CIDADES[chave];
+    PONTOS = c.pontos;
+    aviso(null);
+    if (!mapa) return;
+    limparMarcadoresERota();
+    mapa.flyTo({ center: c.centro, zoom: c.zoom });
+    criarMarcadores();
+    carregarRota();
+  }
+
+  function mostrarCentroBusca(nome, lng, lat) {
+    PONTOS = [];
+    aviso(null);
+    if (!mapa) return;
+    limparMarcadoresERota();
+    mapa.flyTo({ center: [lng, lat], zoom: 12 });
+    var el = document.createElement('div');
+    el.className = 'marcador';
+    el.style.background = CORES[0];
+    el.textContent = '1';
+    var popup = new mapboxgl.Popup({ offset: 18 }).setText(nome);
+    marcadores.push(new mapboxgl.Marker({ element: el }).setLngLat([lng, lat]).setPopup(popup).addTo(mapa));
+  }
+
+  function buscarCidade() {
+    var texto = elTextoCidade.value.trim();
+    if (!tokenAtual) { aviso('Carregue o mapa com o token antes de buscar.', true); return; }
+    if (!texto) { aviso('Digite o nome da cidade.', true); return; }
+    aviso('Buscando...', false);
+    elResultados.innerHTML = '';
+    var url = 'https://api.mapbox.com/geocoding/v5/mapbox.places/' + encodeURIComponent(texto) +
+      '.json?types=place&language=pt&limit=5&access_token=' + encodeURIComponent(tokenAtual);
+    fetch(url).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      var itens = j.features || [];
+      if (!itens.length) { aviso('Nenhuma cidade encontrada.', false); return; }
+      aviso(null);
+      itens.forEach(function (f) {
+        var b = document.createElement('button');
+        b.className = 'sec';
+        b.textContent = f.place_name;
+        b.addEventListener('click', function () {
+          mostrarCentroBusca(f.place_name, f.center[0], f.center[1]);
+        });
+        elResultados.appendChild(b);
+      });
+    }).catch(function (e) {
+      aviso('Erro na busca de cidade: ' + e.message, true);
     });
   }
 
@@ -166,7 +270,7 @@
     elToken.value = '';
     elToken.placeholder = 'Token carregado (só na memória)';
     document.getElementById('vazio').style.display = 'none';
-    if (mapa) { mapa.remove(); mapa = null; coordsRota = null; }
+    if (mapa) { mapa.remove(); mapa = null; coordsRota = null; marcadores = []; }
     elPainel.style.display = 'none';
 
     mapboxgl.accessToken = tokenAtual;
@@ -174,7 +278,7 @@
       mapa = new mapboxgl.Map({
         container: 'mapa',
         style: elEstilo.value,
-        center: [-49.2643, -16.6864],
+        center: CIDADES[cidadeAtual].centro,
         zoom: 12
       });
     } catch (e) {
@@ -189,6 +293,7 @@
     });
     mapa.on('style.load', aoCarregarEstilo);
     mapa.once('load', function () {
+      if (elCidade.value === 'outra') return;
       criarMarcadores();
       carregarRota();
     });
@@ -198,6 +303,20 @@
 
   document.getElementById('carregar').addEventListener('click', iniciar);
   elToken.addEventListener('keydown', function (e) { if (e.key === 'Enter') iniciar(); });
+
+  elCidade.addEventListener('change', function () {
+    var v = elCidade.value;
+    elResultados.innerHTML = '';
+    if (v === 'outra') {
+      elBusca.style.display = 'flex';
+      elTextoCidade.focus();
+    } else {
+      elBusca.style.display = 'none';
+      aplicarCidade(v);
+    }
+  });
+  document.getElementById('buscarCidade').addEventListener('click', buscarCidade);
+  elTextoCidade.addEventListener('keydown', function (e) { if (e.key === 'Enter') buscarCidade(); });
 
   elEstilo.addEventListener('change', function () {
     if (mapa) mapa.setStyle(elEstilo.value);
